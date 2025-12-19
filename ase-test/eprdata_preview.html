@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="hr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>EprDATA preview</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 18px; }
+    .row { display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px; }
+    label { font-size: 14px; display:flex; flex-direction:column; gap:6px; }
+    input, button { padding: 8px 10px; font-size: 14px; }
+    button { cursor: pointer; }
+    .muted { color:#666; font-size: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 13px; }
+    th { background: #f6f6f6; }
+    pre { background:#f6f6f6; padding:12px; overflow:auto; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>EprDATA – pregled evidencije (osebid, timevhod, timeizhod)</h2>
+
+  <div class="row">
+    <label>Od (YYYY-MM-DD)
+      <input id="from" value="2025-11-01" placeholder="2025-11-01">
+    </label>
+
+    <label>Do (YYYY-MM-DD)
+      <input id="to" value="2025-12-01" placeholder="2025-12-01">
+    </label>
+
+    <label>Limit (1–5000)
+      <input id="limit" value="500" inputmode="numeric">
+    </label>
+
+    <button id="run">Povuci podatke</button>
+    <span id="status" class="muted"></span>
+  </div>
+
+  <div class="muted">
+    Filtriranje: <b>timevhod &gt;= od</b> i <b>timevhod &lt; do</b> (najispravnije za DATETIME).
+  </div>
+
+  <div id="tableWrap"></div>
+
+  <h3>Debug</h3>
+  <pre id="debug">—</pre>
+
+<script>
+  const API = "http://localhost:3000/run-query";
+
+  function isISODate(s) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  }
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function render(rows) {
+    const wrap = document.getElementById("tableWrap");
+    wrap.innerHTML = "";
+
+    if (!rows || rows.length === 0) {
+      wrap.innerHTML = "<p>Nema zapisa za odabrani period.</p>";
+      return;
+    }
+
+    const cols = ["osebid", "timevhod", "timeizhod"]; // ODBC često vraća UPPERCASE nazive
+    const table = document.createElement("table");
+
+    const thead = document.createElement("thead");
+    const trh = document.createElement("tr");
+    for (const c of cols) {
+      const th = document.createElement("th");
+      th.textContent = c.toLowerCase();
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      for (const c of cols) {
+        const td = document.createElement("td");
+        td.innerHTML = esc(r[c]);
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+
+    wrap.appendChild(table);
+  }
+
+  async function run() {
+    const status = document.getElementById("status");
+    const debug = document.getElementById("debug");
+    status.textContent = "";
+    debug.textContent = "—";
+
+    try {
+      const from = document.getElementById("from").value.trim();
+      const to = document.getElementById("to").value.trim();
+      const limitRaw = document.getElementById("limit").value.trim();
+
+      if (!isISODate(from)) throw new Error("Polje 'Od' mora biti YYYY-MM-DD (npr. 2025-11-01).");
+      if (!isISODate(to)) throw new Error("Polje 'Do' mora biti YYYY-MM-DD (npr. 2025-12-01).");
+
+      let limit = Number(limitRaw || 500);
+      if (!Number.isFinite(limit)) throw new Error("Limit mora biti broj.");
+      limit = Math.max(1, Math.min(5000, limit));
+
+      // SQL Anywhere: koristimo TOP jer ti već radi u bazi
+      const sql =
+`SELECT TOP ${limit}
+  osebid,
+  timevhod,
+  timeizhod
+FROM EprDATA
+WHERE timevhod >= '${from}'
+  AND timevhod <  '${to}'
+ORDER BY timevhod;`;
+
+      debug.textContent = "SQL:\n" + sql + "\n\n";
+      status.textContent = "Učitavam...";
+
+      const resp = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql })
+      });
+
+      const text = await resp.text();
+      debug.textContent += "RAW RESPONSE:\n" + text;
+
+      if (!resp.ok) {
+        status.textContent = "Greška (vidi Debug).";
+        return;
+      }
+
+      const data = JSON.parse(text);
+      render(data.rows);
+      status.textContent = `OK (rows: ${data.rows?.length ?? 0})`;
+
+    } catch (e) {
+      status.textContent = "Greška.";
+      debug.textContent = String(e?.message ?? e);
+    }
+  }
+
+  document.getElementById("run").addEventListener("click", run);
+</script>
+</body>
+</html>
