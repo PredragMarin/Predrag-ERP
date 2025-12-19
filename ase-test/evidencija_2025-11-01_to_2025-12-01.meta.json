@@ -1,0 +1,12 @@
+{
+  "source": "GoSoft SQLAnywhere",
+  "module": "evidencija_rada_calendar_active",
+  "period_from": "2025-11-01",
+  "period_to": "2025-12-01",
+  "workdays_only": true,
+  "holidays": [
+    "2025-11-18"
+  ],
+  "generated_at": "2025-12-19T04:51:22.923Z",
+  "schema_version": "1.0"
+}

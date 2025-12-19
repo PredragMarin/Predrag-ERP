@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="hr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Evidencija – kalendar + export (CSV/META)</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 18px; }
+    .row { display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px; }
+    label { font-size: 14px; display:flex; flex-direction:column; gap:6px; }
+    input, button { padding: 8px 10px; font-size: 14px; }
+    button { cursor: pointer; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .muted { color:#666; font-size: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 13px; white-space: nowrap; }
+    th { background: #f6f6f6; position: sticky; top: 0; z-index: 1; }
+    pre { background:#f6f6f6; padding:12px; overflow:auto; white-space:pre-wrap; }
+  </style>
+</head>
+
+<body>
+  <h2>Evidencija – raster radnih dana (aktivni osebid u periodu) + Export</h2>
+
+  <div class="row">
+    <label>Od (YYYY-MM-DD)
+      <input id="from" value="2025-11-01" placeholder="2025-11-01">
+    </label>
+
+    <label>Do (YYYY-MM-DD)
+      <input id="to" value="2025-12-01" placeholder="2025-12-01">
+    </label>
+
+    <label>Max radnika (limit)
+      <input id="limitWorkers" value="500" inputmode="numeric">
+    </label>
+
+    <button id="run">Povuci podatke</button>
+    <button id="dlCsv" disabled>Download CSV</button>
+    <button id="dlMeta" disabled>Download META JSON</button>
+
+    <span id="status" class="muted"></span>
+  </div>
+
+  <div class="muted">
+    Logika: radnici = svi <b>osebid</b> koji se pojavljuju u <b>EprDATA</b> u odabranom periodu.
+    Raster: svi radni dani (Pon–Pet). Praznik: <b>2025-11-18</b> (placeholder – prazna vremena).
+  </div>
+
+  <div id="tableWrap"></div>
+
+  <h3>Debug</h3>
+  <pre id="debug">—</pre>
+
+<script>
+  const API = "http://localhost:3000/run-query";
+
+  // Praznici (za sada hard-coded)
+  const HOLIDAYS = new Set(["2025-11-18"]);
+
+  const DOW_HR = ["Ned","Pon","Uto","Sri","Čet","Pet","Sub"];
+
+  let LAST_SNAPSHOT = null; // { meta, rows }
+
+  function isISODate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(s); }
+
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function fmtDateTime(s) {
+    const str = String(s ?? "");
+    const m = str.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+    return m ? m[1] : str;
+  }
+
+  function toISODate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function parseISODateToLocalMidnight(iso) {
+    const [y, m, d] = iso.split("-").map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0);
+  }
+
+  function buildWorkingDays(fromISO, toISO) {
+    const from = parseISODateToLocalMidnight(fromISO);
+    const to = parseISODateToLocalMidnight(toISO); // ekskluzivno
+    const days = [];
+
+    for (let dt = new Date(from); dt < to; dt.setDate(dt.getDate() + 1)) {
+      const dow = dt.getDay();
+      if (dow === 0 || dow === 6) continue; // vikend
+      const iso = toISODate(dt);
+      days.push({ iso, label: `${iso} ${DOW_HR[dow]}` });
+    }
+    return days;
+  }
+
+  function render(rows) {
+    const wrap = document.getElementById("tableWrap");
+    wrap.innerHTML = "";
+
+    if (!rows || rows.length === 0) {
+      wrap.innerHTML = "<p>Nema zapisa za odabrani period.</p>";
+      return;
+    }
+
+    const cols = [
+      { key: "osebid", label: "osebid" },
+      { key: "oib", label: "OIB" },
+      { key: "prezime_ime", label: "Prezime i Ime" },
+      { key: "datum_label", label: "Datum" },
+      { key: "timevhod", label: "timevhod" },
+      { key: "timeizhod", label: "timeizhod" },
+    ];
+
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const trh = document.createElement("tr");
+
+    cols.forEach(c => {
+      const th = document.createElement("th");
+      th.textContent = c.label;
+      trh.appendChild(th);
+    });
+
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      for (const c of cols) {
+        const td = document.createElement("td");
+        const val = r[c.key] ?? r[c.key.toUpperCase()] ?? "";
+
+        if (c.key === "timevhod" || c.key === "timeizhod") {
+          td.innerHTML = esc(fmtDateTime(val));
+        } else {
+          td.innerHTML = esc(val);
+        }
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+
+    wrap.appendChild(table);
+  }
+
+  async function apiQuery(sql) {
+    const resp = await fetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql })
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      let msg = text;
+      try { msg = JSON.parse(text)?.message || text; } catch {}
+      throw new Error(msg);
+    }
+    return JSON.parse(text).rows || [];
+  }
+
+  function downloadBlob(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function csvEscape(v) {
+    const s = String(v ?? "");
+    if (/[;"\r\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
+    return s;
+  }
+
+  function toCsv(rows) {
+    const header = [
+      "osebid",
+      "oib",
+      "prezime_ime",
+      "datum_iso",
+      "datum_label",
+      "ulaz_time",
+      "izlaz_time"
+    ];
+
+    const lines = [];
+    lines.push(header.join(";"));
+
+    for (const r of rows) {
+      const datumIso = String(r.datum_label ?? "").slice(0, 10);
+      const ulaz = String(r.timevhod ?? "").slice(11, 19);
+      const izlaz = String(r.timeizhod ?? "").slice(11, 19);
+
+      const line = [
+        r.osebid ?? "",
+        r.oib ?? "",
+        r.prezime_ime ?? "",
+        datumIso,
+        r.datum_label ?? "",
+        ulaz || "",
+        izlaz || ""
+      ].map(csvEscape).join(";");
+
+      lines.push(line);
+    }
+
+    // UTF-8 BOM pomaže Excelu pri direktnom otvaranju (hr slova)
+    const BOM = "\uFEFF";
+    return BOM + lines.join("\r\n");
+  }
+
+  async function run() {
+    const status = document.getElementById("status");
+    const debug = document.getElementById("debug");
+    status.textContent = "";
+    debug.textContent = "—";
+
+    // disable export dok ne generiramo novi snapshot
+    document.getElementById("dlCsv").disabled = true;
+    document.getElementById("dlMeta").disabled = true;
+    LAST_SNAPSHOT = null;
+
+    try {
+      const from = document.getElementById("from").value.trim();
+      const to = document.getElementById("to").value.trim();
+      const limitWorkersRaw = document.getElementById("limitWorkers").value.trim();
+
+      if (!isISODate(from)) throw new Error("Polje 'Od' mora biti YYYY-MM-DD (npr. 2025-11-01).");
+      if (!isISODate(to)) throw new Error("Polje 'Do' mora biti YYYY-MM-DD (npr. 2025-12-01).");
+
+      let limitWorkers = Number(limitWorkersRaw || 500);
+      if (!Number.isFinite(limitWorkers)) throw new Error("Max radnika mora biti broj.");
+      limitWorkers = Math.max(1, Math.min(5000, limitWorkers));
+
+      const workdays = buildWorkingDays(from, to);
+      if (workdays.length === 0) throw new Error("Nema radnih dana u odabranom periodu.");
+
+      // 1) Aktivni osebid u periodu
+      status.textContent = "Učitavam popis osebid iz evidencije...";
+      const sqlActive =
+`SELECT DISTINCT TOP ${limitWorkers}
+  osebid
+FROM EprDATA
+WHERE timevhod >= '${from}'
+  AND timevhod <  '${to}'
+ORDER BY osebid;`;
+
+      const active = await apiQuery(sqlActive);
+      const activeIds = active
+        .map(r => r.osebid ?? r.OSEBID)
+        .filter(v => v !== null && v !== undefined)
+        .map(v => Number(v))
+        .filter(Number.isFinite);
+
+      if (activeIds.length === 0) {
+        render([]);
+        status.textContent = "Nema evidencije u periodu.";
+        debug.textContent = "SQL (active osebid):\n" + sqlActive;
+        return;
+      }
+
+      // 2) Radnici (osebe) samo za te osebid
+      status.textContent = "Učitavam radnike (osebe) za taj osebid set...";
+      const inList = activeIds.join(",");
+
+      const sqlWorkers =
+`SELECT
+  osebid AS osebid,
+  (priimek || ' ' || ime) AS prezime_ime,
+  alt_id AS oib
+FROM osebe
+WHERE osebid IN (${inList})
+ORDER BY prezime_ime ASC;`;
+
+      const workers = await apiQuery(sqlWorkers);
+
+      // 3) Evidencija u periodu (samo 3 kolone)
+      status.textContent = "Učitavam evidenciju...";
+      const sqlEpr =
+`SELECT
+  osebid,
+  timevhod,
+  timeizhod
+FROM EprDATA
+WHERE timevhod >= '${from}'
+  AND timevhod <  '${to}';`;
+
+      const epr = await apiQuery(sqlEpr);
+
+      // 4) Indeks: (osebid + datum) -> najraniji ulaz / najkasniji izlaz
+      const map = new Map(); // key = `${osebid}|YYYY-MM-DD`
+
+      for (const r of epr) {
+        const osebid = r.osebid ?? r.OSEBID;
+        const vh = r.timevhod ?? r.TIMEVHOD;
+        const iz = r.timeizhod ?? r.TIMEIZHOD;
+        if (osebid == null || !vh) continue;
+
+        const dateISO = String(vh).slice(0, 10);
+        const key = `${osebid}|${dateISO}`;
+
+        const cur = map.get(key);
+        if (!cur) {
+          map.set(key, { timevhod: vh, timeizhod: iz });
+        } else {
+          if (vh && String(vh) < String(cur.timevhod)) cur.timevhod = vh;
+          if (iz && (!cur.timeizhod || String(iz) > String(cur.timeizhod))) cur.timeizhod = iz;
+        }
+      }
+
+      // 5) Grid: radni dani × aktivni radnici
+      status.textContent = "Generiram prikaz...";
+      const out = [];
+
+      for (const d of workdays) {
+        const isHoliday = HOLIDAYS.has(d.iso);
+
+        for (const w of workers) {
+          const osebid = w.osebid ?? w.OSEBID;
+          const prezime_ime = w.prezime_ime ?? w.PREZIME_IME ?? "";
+          const oib = w.oib ?? w.OIB ?? "";
+
+          let timevhod = "";
+          let timeizhod = "";
+
+          if (!isHoliday) {
+            const rec = map.get(`${osebid}|${d.iso}`);
+            if (rec) {
+              timevhod = rec.timevhod ?? "";
+              timeizhod = rec.timeizhod ?? "";
+            }
+          }
+
+          out.push({
+            osebid,
+            oib,
+            prezime_ime,
+            datum_label: d.label,
+            timevhod,
+            timeizhod
+          });
+        }
+      }
+
+      // 6) Sort: datum pa prezime_ime
+      out.sort((a, b) => {
+        const da = String(a.datum_label).slice(0,10);
+        const db = String(b.datum_label).slice(0,10);
+        if (da < db) return -1;
+        if (da > db) return 1;
+        return String(a.prezime_ime).localeCompare(String(b.prezime_ime), "hr");
+      });
+
+      render(out);
+
+      // Snapshot za export (CSV + META)
+      const meta = {
+        source: "GoSoft SQLAnywhere",
+        module: "evidencija_rada_calendar_active",
+        period_from: from,
+        period_to: to,
+        workdays_only: true,
+        holidays: Array.from(HOLIDAYS),
+        generated_at: new Date().toISOString(),
+        schema_version: "1.0"
+      };
+
+      LAST_SNAPSHOT = { meta, rows: out };
+
+      document.getElementById("dlCsv").disabled = false;
+      document.getElementById("dlMeta").disabled = false;
+
+      debug.textContent =
+        "SQL (active osebid):\n" + sqlActive + "\n\n" +
+        "SQL (workers):\n" + sqlWorkers + "\n\n" +
+        "SQL (evidencija):\n" + sqlEpr + "\n\n" +
+        `Aktivnih osebid: ${activeIds.length}, Radnika učitano: ${workers.length}, Radni dani: ${workdays.length}, Redaka prikaza: ${out.length}\n` +
+        `Praznici: ${Array.from(HOLIDAYS).join(", ") || "—"}`;
+
+      status.textContent = `OK (radnika: ${workers.length}, redaka: ${out.length})`;
+
+    } catch (e) {
+      status.textContent = "Greška.";
+      debug.textContent = String(e?.message ?? e);
+      document.getElementById("tableWrap").innerHTML = "";
+    }
+  }
+
+  document.getElementById("run").addEventListener("click", run);
+
+  document.getElementById("dlCsv").addEventListener("click", () => {
+    if (!LAST_SNAPSHOT) return;
+    const { meta, rows } = LAST_SNAPSHOT;
+    const fname = `evidencija_${meta.period_from}_to_${meta.period_to}.csv`;
+    downloadBlob(fname, toCsv(rows), "text/csv;charset=utf-8");
+  });
+
+  document.getElementById("dlMeta").addEventListener("click", () => {
+    if (!LAST_SNAPSHOT) return;
+    const { meta } = LAST_SNAPSHOT;
+    const fname = `evidencija_${meta.period_from}_to_${meta.period_to}.meta.json`;
+    downloadBlob(fname, JSON.stringify(meta, null, 2), "application/json;charset=utf-8");
+  });
+</script>
+</body>
+</html>
